@@ -18,6 +18,15 @@ TICKER_MAP = {
 # 派網現貨網格標準單邊手續費率 (0.05%)
 DEFAULT_FEE_RATE = 0.0005 
 
+# 【新增】根據用戶經驗提供的預設參數
+ASSET_DEFAULTS = {
+    'BTC/USDT': {'lower': 30000.0, 'upper': 140000.0, 'target_net': 0.20, 'grids': 500},
+    'ETH/USDT': {'lower': 1000.0, 'upper': 5000.0, 'target_net': 0.22, 'grids': 500},
+    'SOL/USDT': {'lower': 50.0, 'upper': 300.0, 'target_net': 0.25, 'grids': 500},
+    # BNB/USDT 使用動態預設
+}
+
+
 @st.cache_data
 def get_historical_prices(asset_name, period_days=365):
     """從 Yahoo Finance 獲取指定資產的歷史收盤價格 (1 年)。"""
@@ -29,8 +38,10 @@ def get_historical_prices(asset_name, period_days=365):
     st.info(f"🔄 正在從 Yahoo Finance 獲取 {ticker_symbol} 過去 {period_days} 天的歷史數據...")
     
     try:
-        data = yf.download(ticker_symbol, start=start_date, end=end_date, progress=False)
-        
+        # 使用 yf.Ticker(symbol).history() 獲取數據
+        ticker = yf.Ticker(ticker_symbol)
+        data = ticker.history(start=start_date, end=end_date, auto_adjust=True, actions=False, progress=False)
+
         if data.empty:
             st.error(f"❌ 未能獲取 {ticker_symbol} 的數據。")
             return None
@@ -166,47 +177,42 @@ asset = st.sidebar.selectbox(
 
 # 根據選擇的資產動態設定網格上限
 num_grids_max = 1000 if 'BTC' in asset else 500
-num_grids_default = min(500, num_grids_max) # 預設使用 500 格
 
 st.sidebar.subheader("網格區間設定")
 
 # 預先加載數據 (不顯示 Spinner，避免卡住介面)
 price_data_real = get_historical_prices(asset)
 
-# 設定價格區間預設值 (使用使用者提供的建議值)
+# 設定價格區間預設值 (使用用戶提供的建議值)
 if price_data_real is not None and len(price_data_real) > 0:
     real_min = price_data_real.min()
     real_max = price_data_real.max()
     
     st.sidebar.info(f"實際價格區間: {real_min:,.2f} ~ {real_max:,.2f}")
     
-    # 根據建議設置預設值
-    if asset == 'BTC/USDT': 
-        # 採用第一個建議 (40000-140000, 0.15% 淨利)
-        default_lower, default_upper = 40000.0, 140000.0
-        default_target_net_profit = 0.15
-    elif asset == 'ETH/USDT':
-        # 採用第一個建議 (1500-5500, 0.16% 淨利)
-        default_lower, default_upper = 1500.0, 5500.0
-        default_target_net_profit = 0.16
-    elif asset == 'SOL/USDT':
-        # 採用第一個建議 (100-300, 0.12% 淨利)
-        default_lower, default_upper = 100.0, 300.0
-        default_target_net_profit = 0.12
+    # 【更新】根據 ASSET_DEFAULTS 設定預設值
+    if asset in ASSET_DEFAULTS:
+        defaults = ASSET_DEFAULTS[asset]
+        default_lower, default_upper = defaults['lower'], defaults['upper']
+        default_target_net_profit = defaults['target_net']
+        num_grids_default = defaults['grids']
     else:
-        # BNB/USDT 或其他一般預設
+        # BNB/USDT 或其他一般預設 (使用原有的動態計算)
         price_range = real_max - real_min
         default_lower = max(1.0, real_min * 0.9)
         default_upper = real_max * 1.1
         default_target_net_profit = 0.20
-
+        num_grids_default = min(500, num_grids_max)
+        
     default_lower = max(1.0, min(default_lower, real_min))
     default_upper = max(real_max, default_upper)
 else:
+    # 無法獲取真實數據時的預設值
     st.error("⚠️ 無法獲取真實數據，請手動輸入區間。")
     default_lower = 30000.0
     default_upper = 70000.0
     default_target_net_profit = 0.15
+    num_grids_default = min(500, num_grids_max)
 
 
 col_lower, col_upper = st.sidebar.columns(2)
@@ -234,7 +240,7 @@ trade_size = st.sidebar.number_input("單筆交易量 (Trade Size, 基礎資產)
 fee_rate = st.sidebar.number_input("單邊手續費率 (Fee Rate, 0.05% = 0.0005)", min_value=0.0, max_value=0.01, value=DEFAULT_FEE_RATE, step=0.0001, format="%.4f", help="派網標準為 0.0005 (0.05%)")
 
 # 淨利潤目標 (使用預設值)
-target_net_profit_rate = st.sidebar.number_input("目標淨網格利潤 (%)", min_value=0.01, max_value=5.0, value=default_target_net_profit, step=0.01, format="%.2f", help="您希望每個網格完成一買一賣後，扣除手續費的淨利潤百分比。")
+target_net_profit_rate = st.sidebar.number_input("目標淨網格利潤 (%)", min_value=0.01, max_value=5.0, value=default_target_net_profit, step=0.01, format="%.2f", help="設定您希望每個網格循環完成後，扣除手續費的淨利潤百分比。此值用於計算【利潤率安全線】。")
 
 # 執行回測按鈕
 run_button = st.sidebar.button("🚀 執行回測 (使用歷史數據)", type="primary")
