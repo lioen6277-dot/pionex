@@ -18,7 +18,7 @@ TICKER_MAP = {
 # 派網現貨網格標準單邊手續費率 (0.05%)
 DEFAULT_FEE_RATE = 0.0005 
 
-# 【新增】根據用戶經驗提供的預設參數
+# 根據用戶經驗提供的預設參數
 ASSET_DEFAULTS = {
     'BTC/USDT': {'lower': 30000.0, 'upper': 140000.0, 'target_net': 0.20, 'grids': 500},
     'ETH/USDT': {'lower': 1000.0, 'upper': 5000.0, 'target_net': 0.22, 'grids': 500},
@@ -190,7 +190,7 @@ if price_data_real is not None and len(price_data_real) > 0:
     
     st.sidebar.info(f"實際價格區間: {real_min:,.2f} ~ {real_max:,.2f}")
     
-    # 【更新】根據 ASSET_DEFAULTS 設定預設值
+    # 根據 ASSET_DEFAULTS 設定預設值
     if asset in ASSET_DEFAULTS:
         defaults = ASSET_DEFAULTS[asset]
         default_lower, default_upper = defaults['lower'], defaults['upper']
@@ -268,7 +268,7 @@ if run_button and lower_limit < upper_limit:
     min_profit_rate_gross = min(grid_profit_rates) if grid_profit_rates else 0
     avg_profit_rate_gross = sum(grid_profit_rates) / len(grid_profit_rates) if grid_profit_rates else 0
 
-    # 估算所需資金
+    # 估算所需資金 (簡化：假設所有網格都在下限價格被買入)
     estimated_min_capital = num_grids * trade_size * lower_limit
     
     # 3. 執行回測
@@ -276,9 +276,15 @@ if run_button and lower_limit < upper_limit:
         price_data, grids, trade_size, fee_rate
     )
     
-    # 網格利潤甜蜜點指標 (效率指標)
-    grid_profitability = (total_profit / estimated_min_capital) * 100 if estimated_min_capital > 0 else 0
-    
+    # 網格利潤甜蜜點指標 (總回報率)
+    total_return_rate = (total_profit / estimated_min_capital) * 100 if estimated_min_capital > 0 else 0
+
+    # 【新增】計算年化報酬率 (APY)
+    days_backtested = (price_data.index.max() - price_data.index.min()).days
+    annualized_profit_rate = 0
+    if estimated_min_capital > 0 and days_backtested > 0:
+        annualized_profit_rate = (total_profit / estimated_min_capital) * (365 / days_backtested) * 100
+        
     # 4. 淨利潤要求計算
     # 總手續費率 = 單邊手續費率 * 2 (一買一賣)
     total_fee_rate_percent = fee_rate * 2 * 100 
@@ -304,14 +310,14 @@ if run_button and lower_limit < upper_limit:
         delta="總交易網格對數"
     )
     col3.metric(
-        label="📊 網格套利效率 (%)", 
-        value=f"{grid_profitability:,.2f}%",
-        delta="資金總回報率 (年化需乘上倍數)"
+        label="💸 資金總回報率 (%)", 
+        value=f"{total_return_rate:,.2f}%",
+        delta="總利潤 / 最低資金"
     )
     col4.metric(
-        label="💸 估計最低資金 (USDT)", 
-        value=f"約 {estimated_min_capital:,.2f}",
-        help="簡化估算：網格數 × 單筆交易量 × 下限價格"
+        label="📈 網格套利年化率 (APY)", 
+        value=f"{annualized_profit_rate:,.2f}%",
+        delta="基於最低資金計算的年化回報"
     )
 
     # 第二行：網格參數與利潤要求細節
@@ -402,15 +408,14 @@ if run_button and lower_limit < upper_limit:
     else:
         st.info("ℹ️ 在當前網格設定下，歷史價格路徑未觸發任何完整的套利循環交易。請調整您的上下限區間，確保價格在其範圍內波動。")
 
-    # 6. 網格優化總結 (已修復語法錯誤)
+    # 6. 網格優化總結
     st.header("💡 網格優化總結")
     
-    # 為了避免 Streamlit Markdown 中的潛在語法問題，使用清晰的 f-string 結構，改用字串連接以避免隱藏字符錯誤。
     markdown_content = (
         f"**手續費總結：** 派網現貨網格單邊手續費為 {DEFAULT_FEE_RATE * 100}%，一買一賣總手續費為 **{total_fee_rate_percent:,.2f}%**。\n\n"
         "**關鍵優化目標：**\n"
         f"1. **利潤率安全線：** 您的網格最小毛利潤率必須 $\mathbf{{\ge {required_gross_rate:,.2f}\%}}$ 才能達到 $\mathbf{{{target_net_profit_rate:,.2f}\%}}$ 的淨利潤目標。\n"
-        "2. **資金效率：** 觀察「網格套利效率 (%)」。這個值越高，代表在過去一年的市場條件下，您的網格設定用最少的資金捕捉到最多的套利機會。\n"
+        f"2. **時間效率 (APY)：** 關注 **網格套利年化率 ({annualized_profit_rate:,.2f}%)**，此指標更能反映策略的真實時間價值。\n"
         "3. **網格類型：** 由於您主要採用**等比網格**，當價格上漲時，網格間距會擴大，**最小毛利潤率** 通常會在**最低價**區間，這是您最需要關注的瓶頸。"
     )
     st.markdown(markdown_content)
