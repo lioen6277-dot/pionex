@@ -170,28 +170,35 @@ num_grids_default = min(500, num_grids_max) # 預設使用 500 格
 
 st.sidebar.subheader("網格區間設定")
 
-# 預先加載數據
+# 預先加載數據 (不顯示 Spinner，避免卡住介面)
 price_data_real = get_historical_prices(asset)
 
-# 設定價格區間預設值
+# 設定價格區間預設值 (使用使用者提供的建議值)
 if price_data_real is not None and len(price_data_real) > 0:
     real_min = price_data_real.min()
     real_max = price_data_real.max()
     
     st.sidebar.info(f"實際價格區間: {real_min:,.2f} ~ {real_max:,.2f}")
     
-    # 預設網格範圍為實際價格範圍的 80% (或使用特定建議區間)
-    if 'BTC' in asset: 
+    # 根據建議設置預設值
+    if asset == 'BTC/USDT': 
+        # 採用第一個建議 (40000-140000, 0.15% 淨利)
         default_lower, default_upper = 40000.0, 140000.0
-    elif 'ETH' in asset:
+        default_target_net_profit = 0.15
+    elif asset == 'ETH/USDT':
+        # 採用第一個建議 (1500-5500, 0.16% 淨利)
         default_lower, default_upper = 1500.0, 5500.0
-    elif 'SOL' in asset:
-        default_lower, default_upper = 50.0, 300.0
+        default_target_net_profit = 0.16
+    elif asset == 'SOL/USDT':
+        # 採用第一個建議 (100-300, 0.12% 淨利)
+        default_lower, default_upper = 100.0, 300.0
+        default_target_net_profit = 0.12
     else:
-        # 一般預設
+        # BNB/USDT 或其他一般預設
         price_range = real_max - real_min
         default_lower = max(1.0, real_min * 0.9)
         default_upper = real_max * 1.1
+        default_target_net_profit = 0.20
 
     default_lower = max(1.0, min(default_lower, real_min))
     default_upper = max(real_max, default_upper)
@@ -199,6 +206,7 @@ else:
     st.error("⚠️ 無法獲取真實數據，請手動輸入區間。")
     default_lower = 30000.0
     default_upper = 70000.0
+    default_target_net_profit = 0.15
 
 
 col_lower, col_upper = st.sidebar.columns(2)
@@ -225,8 +233,8 @@ trade_size = st.sidebar.number_input("單筆交易量 (Trade Size, 基礎資產)
 # 根據研究結果，手續費率預設為 0.05%
 fee_rate = st.sidebar.number_input("單邊手續費率 (Fee Rate, 0.05% = 0.0005)", min_value=0.0, max_value=0.01, value=DEFAULT_FEE_RATE, step=0.0001, format="%.4f", help="派網標準為 0.0005 (0.05%)")
 
-# 淨利潤目標
-target_net_profit_rate = st.sidebar.number_input("目標淨網格利潤 (%)", min_value=0.01, max_value=5.0, value=0.15, step=0.01, format="%.2f", help="您希望每個網格完成一買一賣後，扣除手續費的淨利潤百分比。")
+# 淨利潤目標 (使用預設值)
+target_net_profit_rate = st.sidebar.number_input("目標淨網格利潤 (%)", min_value=0.01, max_value=5.0, value=default_target_net_profit, step=0.01, format="%.2f", help="您希望每個網格完成一買一賣後，扣除手續費的淨利潤百分比。")
 
 # 執行回測按鈕
 run_button = st.sidebar.button("🚀 執行回測 (使用歷史數據)", type="primary")
@@ -310,7 +318,7 @@ if run_button and lower_limit < upper_limit:
         help=f"單邊 {fee_rate*100:,.2f}%"
     )
     col6.metric(
-        label="🎯 目標淨利潤率", 
+        label="🎯 目標淨網格利潤 (%)", 
         value=f"{target_net_profit_rate:,.2f}%"
     )
     col7.metric(
@@ -388,15 +396,18 @@ if run_button and lower_limit < upper_limit:
     else:
         st.info("ℹ️ 在當前網格設定下，歷史價格路徑未觸發任何完整的套利循環交易。請調整您的上下限區間，確保價格在其範圍內波動。")
 
+    # 6. 網格優化總結 (已修復語法錯誤)
     st.header("💡 網格優化總結")
-    st.markdown(f"""
-    **手續費總結：** 派網現貨網格單邊手續費為 {DEFAULT_FEE_RATE * 100}%，一買一賣總手續費為 **{total_fee_rate_percent:,.2f}%**。
     
-    **關鍵優化目標：**
-    1. **利潤率安全線：** 您的網格最小毛利潤率必須 $\mathbf{\ge {required_gross_rate:,.2f}\%}$ 才能達到 $\mathbf{{target_net_profit_rate:,.2f}\%}$ 的淨利潤目標。
-    2. **資金效率：** 觀察「網格套利效率 (%)」。這個值越高，代表在過去一年的市場條件下，您的網格設定用最少的資金捕捉到最多的套利機會。
-    3. **網格類型：** 由於您主要採用**等比網格**，當價格上漲時，網格間距會擴大，**最小毛利潤率** 通常會在**最低價**區間，這是您最需要關注的瓶頸。
-    """)
+    # 為了避免 Streamlit Markdown 中的潛在語法問題，使用清晰的 f-string 結構，改用字串連接以避免隱藏字符錯誤。
+    markdown_content = (
+        f"**手續費總結：** 派網現貨網格單邊手續費為 {DEFAULT_FEE_RATE * 100}%，一買一賣總手續費為 **{total_fee_rate_percent:,.2f}%**。\n\n"
+        "**關鍵優化目標：**\n"
+        f"1. **利潤率安全線：** 您的網格最小毛利潤率必須 $\mathbf{{\ge {required_gross_rate:,.2f}\%}}$ 才能達到 $\mathbf{{{target_net_profit_rate:,.2f}\%}}$ 的淨利潤目標。\n"
+        "2. **資金效率：** 觀察「網格套利效率 (%)」。這個值越高，代表在過去一年的市場條件下，您的網格設定用最少的資金捕捉到最多的套利機會。\n"
+        "3. **網格類型：** 由於您主要採用**等比網格**，當價格上漲時，網格間距會擴大，**最小毛利潤率** 通常會在**最低價**區間，這是您最需要關注的瓶頸。"
+    )
+    st.markdown(markdown_content)
 
 elif lower_limit >= upper_limit:
     st.error("❌ 錯誤：上限價格必須嚴格大於下限價格。請調整側邊欄的設定。")
