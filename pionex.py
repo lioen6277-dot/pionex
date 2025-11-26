@@ -40,7 +40,8 @@ def get_historical_prices(asset_name, period_days=365):
     try:
         # 使用 yf.Ticker(symbol).history() 獲取數據
         ticker = yf.Ticker(ticker_symbol)
-        data = ticker.history(start=start_date, end=end_date, auto_adjust=True, actions=False, progress=False)
+        # 修正: 移除不再支援的 'progress=False' 參數
+        data = ticker.history(start=start_date, end=end_date, auto_adjust=True, actions=False)
 
         if data.empty:
             st.error(f"❌ 未能獲取 {ticker_symbol} 的數據。")
@@ -72,11 +73,11 @@ def calculate_grids(lower_limit, upper_limit, num_grids, grid_type):
 
 # --- 2. 回測模擬器 ---
 
-def run_backtest(price_data, grids, trade_size, fee_rate):
+def run_backtest(price_data, grids, trade_size, fee_rate, lower_limit):
     """執行網格回測模擬 (使用真實或模擬數據)。"""
     
     num_levels = len(grids)
-    if num_levels < 2: return 0, 0, 0, []
+    if num_levels < 2: return 0, 0, 0, [], 0, 0
 
     total_profit = 0
     completed_cycles = 0
@@ -106,7 +107,7 @@ def run_backtest(price_data, grids, trade_size, fee_rate):
                 buy_price = grids[triggered_index]
                 
                 current_position += trade_size
-                last_buy_price = buy_price
+                last_buy_price = buy_price # 追蹤最後一次買入價
                 
                 trade_log.append({
                     'Time_Index': time_index, 'Price': current_price,
@@ -157,7 +158,10 @@ def run_backtest(price_data, grids, trade_size, fee_rate):
     
     average_grid_profit = total_profit / completed_cycles if completed_cycles > 0 else 0
     
-    return total_profit, completed_cycles, average_grid_profit, trade_log
+    last_price = price_data.iloc[-1]
+    
+    # 傳回最後的持倉量和最終價格
+    return total_profit, completed_cycles, average_grid_profit, trade_log, current_position, last_price
 
 # --- 3. Streamlit 應用程式界面 ---
 
@@ -272,20 +276,29 @@ if run_button and lower_limit < upper_limit:
     estimated_min_capital = num_grids * trade_size * lower_limit
     
     # 3. 執行回測
-    total_profit, completed_cycles, average_grid_profit, trade_log = run_backtest(
-        price_data, grids, trade_size, fee_rate
+    total_profit, completed_cycles, average_grid_profit, trade_log, current_position, last_price = run_backtest(
+        price_data, grids, trade_size, fee_rate, lower_limit
     )
     
-    # 網格利潤甜蜜點指標 (總回報率)
-    total_return_rate = (total_profit / estimated_min_capital) * 100 if estimated_min_capital > 0 else 0
+    # 4. PnL 綜合計算
+    
+    # 浮動盈虧 (Floating PnL): 剩餘倉位價值 - 剩餘倉位成本 (保守估算成本為 lower_limit)
+    floating_pnl = current_position * (last_price - lower_limit)
 
-    # 【新增】計算年化報酬率 (APY)
+    # 總淨盈虧
+    total_net_pnl = total_profit + floating_pnl
+    
+    # 資金總回報率 (以總淨盈虧計算)
+    total_return_rate = (total_net_pnl / estimated_min_capital) * 100 if estimated_min_capital > 0 else 0
+
+    # 計算年化報酬率 (APY)
     days_backtested = (price_data.index.max() - price_data.index.min()).days
     annualized_profit_rate = 0
     if estimated_min_capital > 0 and days_backtested > 0:
-        annualized_profit_rate = (total_profit / estimated_min_capital) * (365 / days_backtested) * 100
+        # 使用總淨盈虧計算 APY
+        annualized_profit_rate = (total_net_pnl / estimated_min_capital) * (365 / days_backtested) * 100
         
-    # 4. 淨利潤要求計算
+    # 5. 淨利潤要求計算
     # 總手續費率 = 單邊手續費率 * 2 (一買一賣)
     total_fee_rate_percent = fee_rate * 2 * 100 
     
@@ -296,28 +309,28 @@ if run_button and lower_limit < upper_limit:
     st.header("🎯 策略回測表現 (過去 1 年)")
     st.markdown(f"**回測期間**: {price_data.index.min().strftime('%Y-%m-%d')} 至 {price_data.index.max().strftime('%Y-%m-%d')} | **數據點**: {len(price_data)} 點")
 
-    # 第一行：主要成果
+    # 第一行：主要成果 (總淨盈虧/浮動盈虧/年化)
     col1, col2, col3, col4 = st.columns(4)
     
     col1.metric(
-        label="🟢 總網格淨利潤 (USDT)", 
+        label="⭐ 總淨盈虧 (Realized + Floating)", 
+        value=f"{total_net_pnl:,.2f}",
+        delta=f"總回報率: {total_return_rate:,.2f}%"
+    )
+    col2.metric(
+        label="🟢 總網格淨利潤 (Realized PnL)", 
         value=f"{total_profit:,.2f}",
         delta="已實現套利 (扣除手續費)"
     )
-    col2.metric(
-        label="🔄 完整循環次數", 
-        value=f"{completed_cycles}",
-        delta="總交易網格對數"
-    )
     col3.metric(
-        label="💸 資金總回報率 (%)", 
-        value=f"{total_return_rate:,.2f}%",
-        delta="總利潤 / 最低資金"
+        label="🔶 浮動盈虧 (Floating PnL, 估算)", 
+        value=f"{floating_pnl:,.2f}",
+        delta=f"持倉量: {current_position:,.4f}"
     )
     col4.metric(
         label="📈 網格套利年化率 (APY)", 
         value=f"{annualized_profit_rate:,.2f}%",
-        delta="基於最低資金計算的年化回報"
+        delta="基於總淨盈虧計算"
     )
 
     # 第二行：網格參數與利潤要求細節
@@ -382,8 +395,10 @@ if run_button and lower_limit < upper_limit:
         chart_data.append({'price': lower_limit, 'type': 'Lower Limit'})
         chart_data.append({'price': upper_limit, 'type': 'Upper Limit'})
 
-
-    line_chart = alt.Chart(chart_df).mark_line(color='#10B981', size=1).encode(
+    # 調整主線條顏色為鮭魚粉色 (#FA8072)
+    SALMON_PINK = '#FA8072'
+    
+    line_chart = alt.Chart(chart_df).mark_line(color=SALMON_PINK, size=1).encode(
         x=alt.X('Date', title='日期 (Date)'),
         y=alt.Y('Price', title=f'{asset} 價格 (Price)'),
         tooltip=[alt.Tooltip('Date', format='%Y-%m-%d'), alt.Tooltip('Price', format=',.2f')]
@@ -391,6 +406,7 @@ if run_button and lower_limit < upper_limit:
         title=f'{asset} 歷史價格路徑與網格分佈'
     )
     
+    # 調整網格線顏色：下限 (紅)、上限 (藍)、網格 (灰) 保持不變，讓鮭魚粉色更突出
     grid_lines = alt.Chart(pd.DataFrame(chart_data)).mark_rule().encode(
         y='price',
         color=alt.Color('type', scale=alt.Scale(domain=['Lower Limit', 'Upper Limit', 'Grid Level'], range=['#EF4444', '#3B82F6', '#9CA3AF'])),
@@ -415,7 +431,7 @@ if run_button and lower_limit < upper_limit:
         f"**手續費總結：** 派網現貨網格單邊手續費為 {DEFAULT_FEE_RATE * 100}%，一買一賣總手續費為 **{total_fee_rate_percent:,.2f}%**。\n\n"
         "**關鍵優化目標：**\n"
         f"1. **利潤率安全線：** 您的網格最小毛利潤率必須 $\mathbf{{\ge {required_gross_rate:,.2f}\%}}$ 才能達到 $\mathbf{{{target_net_profit_rate:,.2f}\%}}$ 的淨利潤目標。\n"
-        f"2. **時間效率 (APY)：** 關注 **網格套利年化率 ({annualized_profit_rate:,.2f}%)**，此指標更能反映策略的真實時間價值。\n"
+        f"2. **綜合效率 (總淨盈虧)：** 關注 $\mathbf{{總淨盈虧}}$，這是將網格套利與持倉損益加總後的真實表現。如果總淨盈虧為負，代表幣價下跌的浮虧超過了網格賺取的利潤。\n"
         "3. **網格類型：** 由於您主要採用**等比網格**，當價格上漲時，網格間距會擴大，**最小毛利潤率** 通常會在**最低價**區間，這是您最需要關注的瓶頸。"
     )
     st.markdown(markdown_content)
