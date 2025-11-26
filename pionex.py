@@ -1,25 +1,53 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import yfinance as yf
+from datetime import date, timedelta
 
-# --- 1. 價格數據模擬 ---
-# 由於無法存取外部API，我們模擬一個有趨勢和噪音的價格數據
-def generate_mock_prices(initial_price=30000, num_steps=500):
+# --- 0. 配置與數據獲取 ---
+
+# 映射資產到 Yahoo Finance Ticker
+TICKER_MAP = {
+    'BTC/USDT': 'BTC-USD',
+    'ETH/USDT': 'ETH-USD',
+    'SOL/USDT': 'SOL-USD',
+    'BNB/USDT': 'BNB-USD',
+}
+
+@st.cache_data
+def get_historical_prices(asset_name, period_days=365):
+    """從 Yahoo Finance 獲取指定資產的歷史收盤價格 (1 年)。"""
+    ticker_symbol = TICKER_MAP.get(asset_name, 'BTC-USD')
+    
+    end_date = date.today()
+    start_date = end_date - timedelta(days=period_days)
+    
+    st.info(f"🔄 正在從 Yahoo Finance 獲取 {ticker_symbol} 過去 {period_days} 天的歷史數據...")
+    
+    try:
+        # 使用進度條來模擬數據加載
+        data = yf.download(ticker_symbol, start=start_date, end=end_date, progress=False)
+        
+        if data.empty:
+            st.error(f"❌ 未能獲取 {ticker_symbol} 的數據。")
+            return None
+        
+        # 使用 Close 價格進行回測，並將價格轉換為 DataFrame 以便繪圖
+        prices = data['Close'].dropna()
+        return prices.rename('Price')
+        
+    except Exception as e:
+        st.error(f"獲取數據時發生錯誤: {e}。請檢查資產名稱或網絡連線。")
+        return None
+
+# --- 1. 價格數據模擬 (作為真實數據獲取失敗時的備用) ---
+def generate_mock_prices(initial_price=60000, num_steps=1000):
     """模擬一個價格路徑 (帶有輕微向上趨勢和波動)"""
-    # 確保每次運行結果一致，但使用不同的種子來確保資產間的價格略有不同
-    # 這裡只使用一個固定種子確保單次回測穩定性
     np.random.seed(42) 
-    
-    # 建立一個基礎趨勢 (例如，緩慢上漲)
     trend = np.linspace(0, 0.05 * initial_price, num_steps)
-    # 建立隨機波動
     volatility = np.random.randn(num_steps) * (initial_price / 3000)
-    
     prices = initial_price + trend + volatility
-    # 確保價格不會低於某個合理值
     prices = np.maximum(prices, initial_price * 0.95) 
-    
-    # 確保是整數索引 (模擬時間序列)
     return pd.Series(prices, name='Price')
 
 # --- 2. 網格計算邏輯 ---
@@ -30,44 +58,34 @@ def calculate_grids(lower_limit, upper_limit, num_grids, grid_type):
         st.error("網格數必須大於0。")
         return []
     
-    # 網格數 N 實際上產生 N+1 個價格點
     if grid_type == '等差網格 (Arithmetic)':
-        # 等差網格: 價格間距相等
         grids = np.linspace(lower_limit, upper_limit, num_grids + 1)
     
     elif grid_type == '等比網格 (Geometric)':
-        # 等比網格: 價格比例相等 (log空間均分)
         grids = np.geomspace(lower_limit, upper_limit, num_grids + 1)
     
-    # 確保網格點是有序的 (從低到高)
     grids.sort()
-    # 轉換為 Python list 並四捨五入到小數點後兩位
     return [round(float(p), 2) for p in grids]
 
 # --- 3. 回測模擬器 ---
 
 def run_backtest(price_data, grids, trade_size=0.01, fee_rate=0.001):
-    """
-    執行網格回測模擬。
-    (邏輯與前一版本相同，核心是追蹤 Buy Low / Sell High 的循環)
-    """
+    """執行網格回測模擬 (使用真實或模擬數據)。"""
     
     num_levels = len(grids)
-    if num_levels < 2:
-        return 0, 0, 0, []
+    if num_levels < 2: return 0, 0, 0, []
 
     total_profit = 0
     completed_cycles = 0
     current_position = 0
     last_buy_price = 0
     
-    # 追蹤當前價格所處的網格區間 (索引從 0 到 num_levels - 1)
-    # last_grid_index 儲存上次觸發交易的網格線索引
-    last_grid_index = next((i for i, p in enumerate(grids) if p >= price_data.iloc[0]), num_levels - 1)
+    # 根據起始價格確定初始網格位置
+    initial_price = price_data.iloc[0]
+    last_grid_index = next((i for i, p in enumerate(grids) if p >= initial_price), num_levels - 1)
     
     trade_log = []
 
-    # 模擬價格變動
     for i in range(1, len(price_data)):
         current_price = price_data.iloc[i]
         
@@ -82,13 +100,11 @@ def run_backtest(price_data, grids, trade_size=0.01, fee_rate=0.001):
             
             if triggered_index != -1:
                 buy_price = grids[triggered_index]
-                # cost = buy_price * trade_size * (1 + fee_rate) # 實際成本計算 (用於追蹤)
-                
                 current_position += trade_size
                 last_buy_price = buy_price
                 
                 trade_log.append({
-                    'Time_Index': i, 'Price': current_price,
+                    'Time_Index': price_data.index[i], 'Price': current_price,
                     'Action': 'BUY (買入)', 'Amount': trade_size, 
                     'Grid_Price': buy_price, 'Profit': 0,
                     'Note': f"價格下穿網格線 {triggered_index}"
@@ -109,21 +125,20 @@ def run_backtest(price_data, grids, trade_size=0.01, fee_rate=0.001):
                 revenue = sell_price * trade_size * (1 - fee_rate)
                 
                 if current_position >= trade_size:
-                    # 計算利潤: 賣出收入 - 買入成本 (含手續費)
                     profit = revenue - (last_buy_price * trade_size * (1 + fee_rate))
                     total_profit += profit
                     current_position -= trade_size
                     completed_cycles += 1
                     
                     trade_log.append({
-                        'Time_Index': i, 'Price': current_price,
+                        'Time_Index': price_data.index[i], 'Price': current_price,
                         'Action': 'SELL (賣出)', 'Amount': trade_size, 
                         'Grid_Price': sell_price, 'Profit': profit,
                         'Note': f"價格上穿網格線 {triggered_index}，完成循環"
                     })
                 else:
                     trade_log.append({
-                        'Time_Index': i, 'Price': current_price,
+                        'Time_Index': price_data.index[i], 'Price': current_price,
                         'Action': 'SELL (賣出)', 'Amount': trade_size, 
                         'Grid_Price': sell_price, 'Profit': 0,
                         'Note': f"價格上穿網格線 {triggered_index}，無對應買入倉位"
@@ -140,32 +155,62 @@ def run_backtest(price_data, grids, trade_size=0.01, fee_rate=0.001):
 st.set_page_config(layout="wide", page_title="現貨網格機器人模擬推演")
 
 st.title("💰 現貨網格機器人模擬推演 (Pionex Style)")
-st.caption("作者：Google Gemini | **注意: 本應用使用模擬價格數據進行回測**")
+st.caption("作者：Google Gemini | **數據來源: Yahoo Finance 過去一年歷史收盤價**")
 
 # --- 側邊欄輸入設定 ---
 st.sidebar.header("📈 策略與參數設定 (派網風格)")
 
-# 選擇標的 (對模擬結果無影響，僅供展示)
 asset = st.sidebar.selectbox(
     "選擇標的資產 (Asset)",
     ('BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT'),
     index=0
 )
 
+# 根據選擇的資產動態設定網格上限
+num_grids_max = 1000 if 'BTC' in asset else 500
+num_grids_default = min(100, num_grids_max)
+
 st.sidebar.subheader("網格區間設定")
-# 根據選定的資產給定合理的起始價格作為預設值
-if 'BTC' in asset:
-    mock_start_price = 60000.0 
-elif 'ETH' in asset:
-    mock_start_price = 3000.0
+
+# 獲取一年的歷史價格
+with st.spinner(f"正在加載 {asset} 過去 1 年的數據..."):
+    # 預先加載數據
+    price_data_real = get_historical_prices(asset)
+
+# 設定價格區間預設值
+if price_data_real is not None and len(price_data_real) > 0:
+    real_min = price_data_real.min()
+    real_max = price_data_real.max()
+    mid_price = (real_min + real_max) / 2
+    
+    st.sidebar.info(f"實際價格區間: {real_min:,.2f} ~ {real_max:,.2f}")
+    
+    # 預設網格範圍為實際價格範圍的 80%
+    price_range = real_max - real_min
+    default_lower = max(1.0, real_min + price_range * 0.1)
+    default_upper = real_max - price_range * 0.1
 else:
-    mock_start_price = 150.0
+    # 數據加載失敗，使用模擬價格的預設值
+    st.warning("⚠️ 無法獲取真實數據，使用模擬價格預設值。")
+    if 'BTC' in asset: mock_start_price = 60000.0 
+    elif 'ETH' in asset: mock_start_price = 3000.0
+    else: mock_start_price = 150.0
+    
+    default_lower = mock_start_price * 0.9
+    default_upper = mock_start_price * 1.1
 
 col_lower, col_upper = st.sidebar.columns(2)
-lower_limit = col_lower.number_input("下限價格 (Lower Limit)", min_value=1.0, value=mock_start_price * 0.9, step=10.0)
-upper_limit = col_upper.number_input("上限價格 (Upper Limit)", min_value=1.0, value=mock_start_price * 1.1, step=10.0)
+lower_limit = col_lower.number_input("下限價格 (Lower Limit)", min_value=1.0, value=default_lower, step=10.0, format="%.2f")
+upper_limit = col_upper.number_input("上限價格 (Upper Limit)", min_value=1.0, value=default_upper, step=10.0, format="%.2f")
 
-num_grids = st.sidebar.slider("網格數量 (Grid Count)", min_value=5, max_value=100, value=50, step=1)
+# 調整後的網格數量限制
+num_grids = st.sidebar.slider("網格數量 (Grid Count)", 
+                              min_value=5, 
+                              max_value=num_grids_max, 
+                              value=num_grids_default, 
+                              step=5,
+                              help=f"BTC 最大 1000 格，其他最大 500 格。")
+                              
 grid_type = st.sidebar.radio(
     "網格類型 (Grid Type)",
     ('等差網格 (Arithmetic)', '等比網格 (Geometric)'),
@@ -175,18 +220,24 @@ grid_type = st.sidebar.radio(
 st.sidebar.subheader("交易參數")
 trade_size = st.sidebar.number_input("單筆交易量 (Trade Size, 基礎資產)", min_value=0.0001, value=0.01, step=0.0001, format="%.4f", help="每次買入/賣出的基礎資產數量 (例如 0.01 BTC)")
 fee_rate = st.sidebar.number_input("單邊手續費率 (Fee Rate, 例如 0.1%)", min_value=0.0, max_value=0.01, value=0.001, step=0.0001, format="%.4f", help="每筆交易的費率 (例如 0.001 代表 0.1%)")
-num_steps = st.sidebar.slider("模擬價格點數 (Simulation Steps)", min_value=100, max_value=2000, value=1000, step=100, help="模擬回測的價格數據點數量")
-
 
 # --- 主要內容區塊 ---
 
 if lower_limit >= upper_limit:
     st.error("❌ 錯誤：上限價格必須大於下限價格。請調整側邊欄的設定。")
 else:
-    # 1. 計算網格價格
+    # 1. 確定價格數據源
+    if price_data_real is not None and len(price_data_real) > 0:
+        price_data = price_data_real
+    else:
+        # 使用模擬數據作為最終備用
+        st.warning("⚠️ 由於無法獲取真實數據，將使用模擬價格進行回測。")
+        price_data = generate_mock_prices(initial_price=mid_price, num_steps=1000)
+
+    # 2. 計算網格價格
     grids = calculate_grids(lower_limit, upper_limit, num_grids, grid_type)
     
-    # 計算網格利潤率 (單邊，未扣除手續費)
+    # 計算網格利潤率
     grid_profit_rates = [
         (grids[i+1] / grids[i] - 1) * 100 
         for i in range(len(grids) - 1)
@@ -195,18 +246,9 @@ else:
     min_profit_rate = min(grid_profit_rates) if grid_profit_rates else 0
     avg_profit_rate = sum(grid_profit_rates) / len(grid_profit_rates) if grid_profit_rates else 0
 
-    # 估算所需資金 (簡化計算，以中間價位和網格總數為基礎)
-    mid_price = (lower_limit + upper_limit) / 2
-    # 假設初始倉位中性，需要一半的網格作為 USDT 儲備，一半的網格作為基礎資產儲備
-    # 為了保守，我們估算全部網格的成本 (這是一個高估值，但安全)
-    # 最低資金 = 網格數 * 交易量 * 最低價 (極度保守)
+    # 估算所需資金
     estimated_min_capital = num_grids * trade_size * lower_limit
     
-    
-    # 2. 準備價格數據
-    # 以區間中點作為模擬價格的起點
-    mock_initial_price = mid_price
-    price_data = generate_mock_prices(initial_price=mock_initial_price, num_steps=num_steps)
     
     # 3. 執行回測
     total_profit, completed_cycles, average_grid_profit, trade_log = run_backtest(
@@ -214,12 +256,12 @@ else:
     )
     
     # 網格利潤甜蜜點指標 (效率指標)
-    # Grid Profitability = 總網格利潤 / 估算所需最低資金 (類似 ROI)
     grid_profitability = (total_profit / estimated_min_capital) * 100 if estimated_min_capital > 0 else 0
     
     
     # --- 指標卡片顯示 (Pionex Style) ---
-    st.header("🎯 策略回測表現")
+    st.header("🎯 策略回測表現 (過去 1 年)")
+    st.markdown(f"**回測期間**: {price_data.index.min().strftime('%Y-%m-%d')} 至 {price_data.index.max().strftime('%Y-%m-%d')}")
 
     # 第一行：主要成果
     col1, col2, col3, col4 = st.columns(4)
@@ -270,7 +312,7 @@ else:
     
     # --- 網格線價格與分佈圖表 ---
 
-    st.subheader("網格線價格與分佈")
+    st.subheader("價格路徑與網格分佈")
     
     # 顯示網格細節表格
     grid_df = pd.DataFrame({
@@ -285,7 +327,9 @@ else:
     # 繪製價格曲線和網格線
     st.subheader("價格路徑與網格分佈圖")
     
-    chart_df = pd.DataFrame({'Price': price_data.values})
+    # 使用日期作為 X 軸
+    chart_df = price_data.to_frame().reset_index()
+    chart_df.columns = ['Date', 'Price']
     
     chart_data = [{'price': p, 'type': 'Grid Level'} for p in grids]
     chart_data.append({'price': lower_limit, 'type': 'Lower Limit'})
@@ -293,12 +337,12 @@ else:
     
     import altair as alt
     
-    line_chart = alt.Chart(chart_df.reset_index()).mark_line(color='#10B981', size=1).encode(
-        x=alt.X('index', title='時間步 (Time Step)'),
+    line_chart = alt.Chart(chart_df).mark_line(color='#10B981', size=1).encode(
+        x=alt.X('Date', title='日期 (Date)'),
         y=alt.Y('Price', title=f'{asset} 價格 (Price)'),
-        tooltip=['index', alt.Tooltip('Price', format=',.2f')]
+        tooltip=[alt.Tooltip('Date', format='%Y-%m-%d'), alt.Tooltip('Price', format=',.2f')]
     ).properties(
-        title=f'{asset} 模擬價格路徑與網格分佈'
+        title=f'{asset} 過去一年價格路徑與網格分佈'
     )
     
     grid_lines = alt.Chart(pd.DataFrame(chart_data)).mark_rule().encode(
@@ -315,7 +359,7 @@ else:
         log_df = pd.DataFrame(trade_log)
         st.dataframe(log_df, use_container_width=True, hide_index=True)
     else:
-        st.info("ℹ️ 在當前價格路徑和網格設定下，沒有發生完整的套利循環交易。請檢查價格區間是否包含價格波動。")
+        st.info("ℹ️ 在當前網格設定下，價格路徑未觸發任何完整的套利循環交易。請調整您的上下限區間。")
 
     st.header("💡 甜蜜點尋找策略")
     st.markdown("""
